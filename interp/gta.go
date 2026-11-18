@@ -2,6 +2,7 @@ package interp
 
 import (
 	"path"
+	"reflect"
 )
 
 // gta performs a global types analysis on the AST, registering types,
@@ -39,6 +40,9 @@ func (interp *Interpreter) gta(root *node, rpath, importPath, pkgName string) ([
 			}
 
 		case defineStmt:
+			if err = n.rejectEmbedOnInitializer(); err != nil {
+				return false
+			}
 			var (
 				atyp *itype
 				err2 error
@@ -109,6 +113,9 @@ func (interp *Interpreter) gta(root *node, rpath, importPath, pkgName string) ([
 			return false
 
 		case defineXStmt:
+			if err = n.rejectEmbedOnInitializer(); err != nil {
+				return false
+			}
 			err = compDefineX(sc, n)
 
 		case valueSpec:
@@ -123,11 +130,31 @@ func (interp *Interpreter) gta(root *node, rpath, importPath, pkgName string) ([
 					return false
 				}
 			}
+			pats, perr := n.embedDirectives()
+			if perr != nil {
+				err = perr
+				return false
+			}
+			var embedded reflect.Value
+			if len(pats) > 0 {
+				if n.anc == nil || n.anc.kind != varDecl || n.anc.anc == nil || n.anc.anc.kind != fileStmt {
+					err = n.cfgErrorf("go:embed only allowed at package level")
+					return false
+				}
+				embedded, err = interp.loadEmbedValue(n, n.typ, pats)
+				if err != nil {
+					return false
+				}
+			}
 			for _, c := range n.child[:l] {
 				asImportName := path.Join(c.ident, baseName)
 				sym, exists := sc.sym[asImportName]
 				if !exists {
-					sc.sym[c.ident] = &symbol{index: sc.add(n.typ), kind: varSym, global: true, typ: n.typ, node: n}
+					idx := sc.add(n.typ)
+					sc.sym[c.ident] = &symbol{index: idx, kind: varSym, global: true, typ: n.typ, node: n}
+					if embedded.IsValid() {
+						interp.setEmbedValue(idx, embedded)
+					}
 					continue
 				}
 				c.level = globalFrame

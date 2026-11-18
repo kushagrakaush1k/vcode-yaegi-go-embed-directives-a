@@ -366,7 +366,8 @@ func wrapInMain(src string) string {
 }
 
 func (interp *Interpreter) parse(src, name string, inc bool) (node ast.Node, err error) {
-	mode := parser.DeclarationErrors
+	// Comments are required for //go:embed and for yaegi:tags.
+	mode := parser.DeclarationErrors | parser.ParseComments
 
 	// Allow incremental parsing of declarations or statements, by inserting
 	// them in a pseudo file package or function. Those statements or
@@ -384,8 +385,6 @@ func (interp *Interpreter) parse(src, name string, inc bool) (node ast.Node, err
 			inFunc = true
 			src = wrapInMain(src)
 		}
-		// Parse comments in REPL mode, to allow tag setting.
-		mode |= parser.ParseComments
 	}
 
 	if ok, err := interp.buildOk(&interp.context, name, src); !ok || err != nil {
@@ -429,6 +428,12 @@ func (interp *Interpreter) parse(src, name string, inc bool) (node ast.Node, err
 // The given name is used to set the filename of the relevant source file in the
 // interpreter's FileSet.
 func (interp *Interpreter) ast(f ast.Node) (string, *node, error) {
+	if file, ok := f.(*ast.File); ok {
+		if err := interp.checkEmbedPlacement(file); err != nil {
+			return "", nil, err
+		}
+	}
+
 	var err error
 	var root *node
 	var anc astNode
@@ -743,7 +748,11 @@ func (interp *Interpreter) ast(f ast.Node) (string, *node, error) {
 			case token.VAR:
 				kind = varDecl
 			}
-			st.push(addChild(&root, anc, pos, kind, aNop), nod)
+			n := addChild(&root, anc, pos, kind, aNop)
+			if e := interp.attachDeclEmbed(n, a.Doc, anc.node, a.Tok); e != nil && err == nil {
+				err = e
+			}
+			st.push(n, nod)
 
 		case *ast.GoStmt:
 			st.push(addChild(&root, anc, pos, goStmt, aNop), nod)
@@ -926,6 +935,9 @@ func (interp *Interpreter) ast(f ast.Node) (string, *node, error) {
 			n := addChild(&root, anc, pos, kind, act)
 			n.nleft = len(a.Names)
 			n.nright = len(a.Values)
+			if e := interp.attachSpecEmbed(n, a.Doc, anc.node); e != nil && err == nil {
+				err = e
+			}
 			st.push(n, nod)
 
 		default:

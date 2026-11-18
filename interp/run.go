@@ -3562,6 +3562,10 @@ func reset(n *node) {
 		typ := n.child[0].typ.frameType()
 		i := n.child[0].findex
 		n.exec = func(f *frame) bltn {
+			// //go:embed already stored the file contents in this slot.
+			if keepEmbed(n.interp, i) {
+				return next
+			}
 			f.data[i] = reflect.New(typ).Elem()
 			return next
 		}
@@ -3570,8 +3574,12 @@ func reset(n *node) {
 		i0, i1 := c0.findex, c1.findex
 		t0, t1 := c0.typ.frameType(), c1.typ.frameType()
 		n.exec = func(f *frame) bltn {
-			f.data[i0] = reflect.New(t0).Elem()
-			f.data[i1] = reflect.New(t1).Elem()
+			if !keepEmbed(n.interp, i0) {
+				f.data[i0] = reflect.New(t0).Elem()
+			}
+			if !keepEmbed(n.interp, i1) {
+				f.data[i1] = reflect.New(t1).Elem()
+			}
 			return next
 		}
 	default:
@@ -3583,6 +3591,9 @@ func reset(n *node) {
 		}
 		n.exec = func(f *frame) bltn {
 			for i, ind := range index {
+				if keepEmbed(n.interp, ind) {
+					continue
+				}
 				f.data[ind] = reflect.New(types[i]).Elem()
 			}
 			return next

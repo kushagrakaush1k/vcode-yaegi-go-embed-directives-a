@@ -50,9 +50,10 @@ type node struct {
 	gen        bltnGenerator  // generator function to produce above bltn
 	val        interface{}    // static generic value (CFG execution)
 	rval       reflect.Value  // reflection value to let runtime access interpreter (CFG)
-	ident      string         // set if node is a var or func
-	redeclared bool           // set if node is a redeclared variable (CFG)
-	meta       interface{}    // meta stores meta information between gta runs, like errors
+	ident         string      // set if node is a var or func
+	redeclared    bool        // set if node is a redeclared variable (CFG)
+	meta          interface{} // meta stores meta information between gta runs, like errors
+	embedPatterns []string    // //go:embed patterns on a var declaration or spec
 }
 
 func (n *node) shouldBreak() bool {
@@ -217,6 +218,10 @@ type Interpreter struct {
 	hooks *hooks // symbol hooks
 
 	debugger *Debugger
+
+	// embedValues stores //go:embed contents by global frame index.
+	// They are copied into the frame before the first statement runs.
+	embedValues map[int]reflect.Value
 }
 
 const (
@@ -485,7 +490,14 @@ func (interp *Interpreter) resizeFrame() {
 	data := make([]reflect.Value, l)
 	copy(data, interp.frame.data)
 	for j, t := range interp.universe.types[b:] {
-		data[b+j] = reflect.New(t).Elem()
+		idx := b + j
+		// An embedded var already has its file contents. The plain zero
+		// value would wipe them, and reset is not allowed to put them back.
+		if v, ok := interp.embedValues[idx]; ok {
+			data[idx] = v
+			continue
+		}
+		data[idx] = reflect.New(t).Elem()
 	}
 	interp.frame.data = data
 }
