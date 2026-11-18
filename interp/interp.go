@@ -25,34 +25,35 @@ import (
 
 // Interpreter node structure for AST and CFG.
 type node struct {
-	debug      *nodeDebugData // debug info
-	child      []*node        // child subtrees (AST)
-	anc        *node          // ancestor (AST)
-	param      []*itype       // generic parameter nodes (AST)
-	start      *node          // entry point in subtree (CFG)
-	tnext      *node          // true branch successor (CFG)
-	fnext      *node          // false branch successor (CFG)
-	interp     *Interpreter   // interpreter context
-	index      int64          // node index (dot display)
-	findex     int            // index of value in frame or frame size (func def, type def)
-	level      int            // number of frame indirections to access value
-	nleft      int            // number of children in left part (assign) or indicates preceding type (compositeLit)
-	nright     int            // number of children in right part (assign)
-	kind       nkind          // kind of node
-	pos        token.Pos      // position in source code, relative to fset
-	sym        *symbol        // associated symbol
-	typ        *itype         // type of value in frame, or nil
-	recv       *receiver      // method receiver node for call, or nil
-	types      []reflect.Type // frame types, used by function literals only
-	scope      *scope         // frame scope
-	action     action         // action
-	exec       bltn           // generated function to execute
-	gen        bltnGenerator  // generator function to produce above bltn
-	val        interface{}    // static generic value (CFG execution)
-	rval       reflect.Value  // reflection value to let runtime access interpreter (CFG)
-	ident      string         // set if node is a var or func
-	redeclared bool           // set if node is a redeclared variable (CFG)
-	meta       interface{}    // meta stores meta information between gta runs, like errors
+	debug         *nodeDebugData // debug info
+	child         []*node        // child subtrees (AST)
+	anc           *node          // ancestor (AST)
+	param         []*itype       // generic parameter nodes (AST)
+	start         *node          // entry point in subtree (CFG)
+	tnext         *node          // true branch successor (CFG)
+	fnext         *node          // false branch successor (CFG)
+	interp        *Interpreter   // interpreter context
+	index         int64          // node index (dot display)
+	findex        int            // index of value in frame or frame size (func def, type def)
+	level         int            // number of frame indirections to access value
+	nleft         int            // number of children in left part (assign) or indicates preceding type (compositeLit)
+	nright        int            // number of children in right part (assign)
+	kind          nkind          // kind of node
+	pos           token.Pos      // position in source code, relative to fset
+	sym           *symbol        // associated symbol
+	typ           *itype         // type of value in frame, or nil
+	recv          *receiver      // method receiver node for call, or nil
+	types         []reflect.Type // frame types, used by function literals only
+	scope         *scope         // frame scope
+	action        action         // action
+	exec          bltn           // generated function to execute
+	gen           bltnGenerator  // generator function to produce above bltn
+	val           interface{}    // static generic value (CFG execution)
+	rval          reflect.Value  // reflection value to let runtime access interpreter (CFG)
+	ident         string         // set if node is a var or func
+	redeclared    bool           // set if node is a redeclared variable (CFG)
+	meta          interface{}    // meta stores meta information between gta runs, like errors
+	embedPatterns []string       // //go:embed patterns on a var declaration or spec
 }
 
 func (n *node) shouldBreak() bool {
@@ -217,6 +218,10 @@ type Interpreter struct {
 	hooks *hooks // symbol hooks
 
 	debugger *Debugger
+
+	// embedValues stores //go:embed contents by global frame index.
+	// They are copied into the frame before the first statement runs.
+	embedValues map[int]reflect.Value
 }
 
 const (
@@ -396,6 +401,7 @@ func New(options Options) *Interpreter {
 	// even if they are not file descriptors.
 	i.opt.specialStdio, _ = strconv.ParseBool(os.Getenv("YAEGI_SPECIAL_STDIO"))
 
+	registerEmbedPackage(&i)
 	return &i
 }
 
@@ -485,7 +491,14 @@ func (interp *Interpreter) resizeFrame() {
 	data := make([]reflect.Value, l)
 	copy(data, interp.frame.data)
 	for j, t := range interp.universe.types[b:] {
-		data[b+j] = reflect.New(t).Elem()
+		idx := b + j
+		// An embedded var already has its file contents. The plain zero
+		// value would wipe them, and reset is not allowed to put them back.
+		if v, ok := interp.embedValues[idx]; ok {
+			data[idx] = v
+			continue
+		}
+		data[idx] = reflect.New(t).Elem()
 	}
 	interp.frame.data = data
 }
