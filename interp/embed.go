@@ -14,10 +14,13 @@ import (
 	"strings"
 )
 
-// Package-level //go:embed fills a string or []byte variable from the
+// Package-level //go:embed fills a string, a []byte, or an embed.FS from the
 // interpreter source filesystem. Patterns are relative to the directory of
-// the Go file that contains the directive. Those two types require the
-// patterns, taken together, to match exactly one file.
+// the Go file that contains the directive. Consecutive //go:embed lines on
+// the same declaration are combined. Every pattern must match at least one
+// file. string and []byte still require exactly one file in total. embed.FS
+// keeps one or more. A pattern that names a directory includes the whole
+// tree under that directory.
 
 func (interp *Interpreter) posError(pos token.Pos, format string, args ...interface{}) error {
 	p := interp.fset.Position(pos)
@@ -146,20 +149,28 @@ func (n *node) rejectEmbedOnInitializer() error {
 }
 
 func (interp *Interpreter) loadEmbedValue(n *node, typ *itype, patterns []string) (reflect.Value, error) {
-	if !isEmbedString(typ) && !isEmbedBytes(typ) {
+	single := isEmbedString(typ) || isEmbedBytes(typ)
+	if !single && !isEmbedFS(typ) {
 		return reflect.Value{}, n.cfgErrorf("go:embed cannot apply to var of type %s", typ.id())
 	}
 	filename := filepath.ToSlash(interp.fset.Position(n.pos).Filename)
-	matches, err := matchEmbedPatterns(interp.filesystem, path.Dir(filename), patterns)
+	dir := path.Dir(filename)
+	matches, err := matchEmbedPatterns(interp.filesystem, dir, patterns)
 	if err != nil {
 		return reflect.Value{}, n.cfgErrorf("%s", err.Error())
 	}
-	switch len(matches) {
-	case 0:
+	if len(matches) == 0 {
 		return reflect.Value{}, n.cfgErrorf("go:embed: no matching files found")
-	case 1:
-	default:
+	}
+	if single && len(matches) != 1 {
 		return reflect.Value{}, n.cfgErrorf("go:embed: pattern must match exactly one file")
+	}
+	if isEmbedFS(typ) {
+		fsys, err := embedFSFromMatches(interp.filesystem, dir, matches)
+		if err != nil {
+			return reflect.Value{}, n.cfgErrorf("%s", err.Error())
+		}
+		return newEmbedFSValue(typ, fsys), nil
 	}
 	data, err := fs.ReadFile(interp.filesystem, matches[0])
 	if err != nil {
@@ -195,6 +206,22 @@ func isEmbedBytes(t *itype) bool {
 	}
 	v := t.val
 	return v.cat == uint8T && v.path == "" && v.name == "uint8"
+}
+
+// embedFSType is the concrete type interpreted code sees as embed.FS.
+var embedFSType = reflect.TypeOf(embedFS{})
+
+func isEmbedFS(t *itype) bool {
+	return t != nil && t.cat == valueT && t.rtype == embedFSType
+}
+
+// registerEmbedPackage exposes embed.FS to interpreted code.
+func registerEmbedPackage(interp *Interpreter) {
+	if interp.binPkg["embed"] == nil {
+		interp.binPkg["embed"] = map[string]reflect.Value{}
+	}
+	interp.binPkg["embed"]["FS"] = reflect.ValueOf((*embedFS)(nil))
+	interp.pkgNames["embed"] = "embed"
 }
 
 func newEmbedValue(typ *itype, data []byte) reflect.Value {
@@ -324,6 +351,10 @@ func matchEmbedPatterns(fsys fs.FS, dir string, patterns []string) ([]string, er
 		if err != nil {
 			return nil, err
 		}
+		// A pattern that matches nothing is an error. It is not dropped.
+		if len(matches) == 0 {
+			return nil, fmt.Errorf("go:embed: no matching files found")
+		}
 		for _, m := range matches {
 			if seen[m] {
 				continue
@@ -429,6 +460,8 @@ func matchEmbedLiteral(fsys fs.FS, dir, pattern string, all bool) ([]string, err
 	if !fi.IsDir() {
 		return []string{full}, nil
 	}
+	// A directory pattern includes the whole tree, not only the files
+	// sitting directly inside the directory.
 	var matches []string
 	err = fs.WalkDir(fsys, full, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
